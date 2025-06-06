@@ -6,6 +6,12 @@ from dotenv import load_dotenv
 from pydub import AudioSegment
 import os
 
+from agents.generador_artista import GeneradorArtista
+
+oculto = GeneradorArtista()
+oculto.generar_bloque_automatico()
+
+
 def main():
     load_dotenv()
 
