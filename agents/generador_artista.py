@@ -1,90 +1,97 @@
 # agents/generador_artista.py
 
+from vertexai import init
+init(project="gen-lang-client-0241827889", location="europe-west4")
+from vertexai.preview.language_models import TextGenerationModel
+from agents.locutor import Locutor
+from pydub import AudioSegment
 import os
-import csv
-from datetime import date
 import google.generativeai as genai
-from dotenv import load_dotenv
-from agents.artista_oculto import ArtistaOculto
+
+
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+model = genai.GenerativeModel("gemini-1.5-pro")
+response = model.generate_content(prompt)
+
 
 class GeneradorArtista:
     def __init__(self):
-        load_dotenv()
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-pro")
-        self.historial_csv = "output/historial_artistas.csv"
-        self._asegurar_historial()
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if not cred_path or not os.path.exists(cred_path):
+            raise EnvironmentError("❌ Credencial JSON de Google Cloud no encontrada o mal configurada. Verifica GOOGLE_APPLICATION_CREDENTIALS.")
+        else:
+            print(f"🔐 Credencial detectada: {cred_path}")
 
-    def _asegurar_historial(self):
-        if not os.path.exists(self.historial_csv):
-            with open(self.historial_csv, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["fecha", "artista"])
+        try:
+            self.model = TextGenerationModel.from_pretrained("text-bison")
+        except Exception as e:
+            print("❌ No se pudo cargar el modelo Gemini 1.5 Pro:", e)
+            self.model = None
 
-    def _registrar_artista(self, nombre):
-        with open(self.historial_csv, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([str(date.today()), nombre])
+        self.locutor_atenea = Locutor("es-ES-Wavenet-D")
+        self.locutor_personaje = Locutor("es-ES-Wavenet-A")
+        self.sonido_espera = "assets/espera_personaje.mp3"
+        os.makedirs("output", exist_ok=True)
 
-    def _consultar_gemini(self, artista):
+    def _consultar_gemini(self, nombre_artista):
+        if not self.model:
+            raise RuntimeError("Modelo Gemini no disponible. Verifica tu entorno y credenciales.")
+
         prompt = f"""
-Eres un experto en historia del arte. Quiero que interpretes al artista {artista}, sin decir su nombre, y generes lo siguiente:
+Eres un artista oculto. Te propongo el siguiente nombre: "{nombre_artista}".
 
-1. Nueve pistas únicas sobre tu identidad. Habla en primera persona.
-2. Una reflexión personal como artista oculto (filosófica o emotiva).
-3. Una breve revelación con tu nombre: "Soy..."
-4. Un consejo final inspirador para quien ama el arte.
+1. Escribe 9 pistas que describan su estilo, logros o historia, sin mencionar su nombre.
+2. Luego, crea una reflexión profunda del artista como si fuera él mismo.
+3. Después, incluye una revelación donde diga quién es.
+4. Por último, da un consejo o frase inspiradora para futuros artistas.
 
-Devuelve todo separado por etiquetas:
+Usa este formato con doble salto entre secciones:
 PISTAS:
-- ...
-- ...
-REFLEXION:
-...
-RESOLUCION:
-...
+(pista 1 a 9 numeradas)
+REFLEXIÓN:
+(texto)
+RESOLUCIÓN:
+(nombre revelado)
 CONSEJO:
-...
-        """
-
-        respuesta = self.model.generate_content(prompt)
+(texto motivador)
+"""
+        respuesta = self.model.predict(prompt, max_output_tokens=1000)
         return respuesta.text
 
-    def _parsear_respuesta(self, texto):
-        secciones = {"PISTAS": [], "REFLEXION": "", "RESOLUCION": "", "CONSEJO": ""}
-        actual = None
-        for linea in texto.splitlines():
-            linea = linea.strip()
-            if linea.startswith("PISTAS"):
-                actual = "PISTAS"
-            elif linea.startswith("REFLEXION"):
-                actual = "REFLEXION"
-            elif linea.startswith("RESOLUCION"):
-                actual = "RESOLUCION"
-            elif linea.startswith("CONSEJO"):
-                actual = "CONSEJO"
-            elif actual == "PISTAS" and linea.startswith("-"):
-                secciones["PISTAS"].append(linea.lstrip("- ").strip())
-            elif actual and linea:
-                secciones[actual] += " " + linea
-        return secciones
-
     def generar_bloque_automatico(self):
-        artista = input("🎭 ¿Quién será el artista oculto de hoy? ").strip()
-        print(f"🔍 Buscando pistas para {artista}...\n")
+        artista = input("🎨 ¿Qué artista quieres usar hoy como oculto?: ").strip()
         texto = self._consultar_gemini(artista)
-        datos = self._parsear_respuesta(texto)
 
-        # Montar audio con artista_oculto
+        secciones = self._parsear_respuesta(texto)
+
+        from agents.artista_oculto import ArtistaOculto
         bloqueador = ArtistaOculto()
-        ruta = bloqueador.generar_bloque(
+        ruta, contenido = bloqueador.generar_bloque(
             artista=artista,
-            pistas=datos["PISTAS"],
-            reflexion=datos["REFLEXION"],
-            resolucion=datos["RESOLUCION"],
-            consejo=datos["CONSEJO"]
+            pistas=secciones['pistas'],
+            reflexion=secciones['reflexion'],
+            resolucion=secciones['resolucion'],
+            consejo=secciones['consejo']
         )
+        return ruta, contenido
 
-        self._registrar_artista(artista)
-        return ruta
+    def _parsear_respuesta(self, texto):
+        bloques = {
+            "pistas": [],
+            "reflexion": "",
+            "resolucion": "",
+            "consejo": ""
+        }
+        partes = texto.split("PISTAS:")[-1].split("REFLEXIÓN:")
+        if len(partes) >= 2:
+            pistas_brutas = partes[0].strip().split("\n")
+            bloques["pistas"] = [p.strip("-•1234567890. ").strip() for p in pistas_brutas if p.strip()]
+            partes_restantes = partes[1].split("RESOLUCIÓN:")
+            if len(partes_restantes) >= 2:
+                bloques["reflexion"] = partes_restantes[0].strip()
+                partes_finales = partes_restantes[1].split("CONSEJO:")
+                if len(partes_finales) >= 2:
+                    bloques["resolucion"] = partes_finales[0].strip()
+                    bloques["consejo"] = partes_finales[1].strip()
+        return bloques
